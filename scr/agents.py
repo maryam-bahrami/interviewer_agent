@@ -7,8 +7,16 @@ from pathlib import Path
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from openai import OpenAI
+from dotenv import load_dotenv
+import os
+import sys
 
-# ---- Types --------------------------------------------------------------
+parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
+sys.path.append(parent_dir)
+load_dotenv(os.path.join(parent_dir, ".env"))
+
+
 
 class AgentState(TypedDict, total=False):
     jd: str
@@ -20,21 +28,25 @@ class AgentState(TypedDict, total=False):
     answers: List[Dict]
     done: bool
 
-# ---- Config loader -------------------------------------------------------
 
-@dataclass
-class JobConfig:
-    job_description: str
-    questions: List[Dict]
+def call_llm(system_prompt, user_prompt):
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    client = OpenAI(api_key=openai_api_key)
 
-def load_job_config(path: str | Path) -> JobConfig:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return JobConfig(job_description=data["job_description"], questions=data["questions"])
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    completion = client.chat.completions.create(
+        messages=messages,
+        model="gpt-4o-mini",
+        max_tokens=512,
+        temperature=0.2,
+        n=1,
+        stop=None
+    )
+    return completion.choices[0].message.content.strip()
 
-# ---- Helper --------------------------------------------------------------
-
-
-# ---- Interviewer class ---------------------------------------------------
 
 class Interviewer:
     """Encapsulates the ask/evaluate logic as class methods."""
@@ -125,7 +137,52 @@ class Interviewer:
                 missing.append(kw)
         return missing
 
-# ---- Router --------------------------------------------------------------
+    def reviewer_node(self, question, answer, expected_points):
+        system_prompt = """
+        You are an expert answer reviewer.
+        Your job:
+        - Evaluate how well a candidate's answer responds to a given question.
+        - Compare the answer against a list of expected points or keywords.
+        - Be strict but fair, and explain your reasoning briefly.
+        - Never invent facts that are not in the answer.
+        
+        Evaluation criteria:
+        1. Relevance – Does the answer actually address the question?
+        2. Completeness – How many of the expected points are covered?
+        3. Depth – Does the answer show understanding, not just buzzwords?
+        4. Clarity – Is the answer clear and coherent?
+        
+        Return your evaluation **only** in this JSON format:
+        
+        {
+          "score": 0–100,
+          "verdict": "excellent" | "good" | "average" | "poor",
+          "covered_points": [ "point1", "point2", ... ],
+          "missing_points": [ "pointX", "pointY", ... ],
+          "strengths": "short paragraph",
+          "weaknesses": "short paragraph",
+          "follow_up_question": "one concise follow-up question focusing on gaps"
+        }
+        
+        If something is not applicable, use an empty list or an empty string.
+        Do not include any other text outside the JSON.
+        """
+
+        user_prompt = f"""
+        Question:
+        {question}
+        
+        Candidate answer:
+        {answer}
+        
+        Expected points to look for (can be keywords, concepts, or examples):
+        {expected_points}
+        
+        Please review the answer based on the system instructions and return the JSON evaluation.
+        """
+
+        llm_response = call_llm(system_prompt, user_prompt)
+        return llm_response
 
     def router(self, state: AgentState) -> str:
         """Decide the next node based on the current state."""
