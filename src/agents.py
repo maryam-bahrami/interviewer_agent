@@ -12,7 +12,7 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 sys.path.append(parent_dir)
 load_dotenv(os.path.join(parent_dir, ".env"))
-openai_api_key = os.getenv("OPENAI_API_KEY")
+
 
 
 class AgentState(TypedDict, total=False):
@@ -26,24 +26,8 @@ class AgentState(TypedDict, total=False):
     done: bool
 
 
-def find_missing_keywords(answer: str, required_keywords: List[str]) -> List[str]:
-    """
-    Simple keyword gap checker (deterministic & transparent)
-    """
-    if not required_keywords:
-        return []
-    a = answer.lower()
-    missing = []
-    for kw in required_keywords:
-        # Accept keyword match if any token group appears (rough, but robust)
-        # Also tolerate separators like / , - _
-        pattern = r"\b" + re.escape(kw.lower()).replace(r"\ ", r"[\s\-/\\_]+") + r"\b"
-        if not re.search(pattern, a):
-            missing.append(kw)
-    return missing
-
-
-def call_llm(openai_api_key, system_prompt, user_prompt):
+def call_llm(system_prompt, user_prompt):
+    openai_api_key = os.getenv("OPENAI_API_KEY")
     client = OpenAI(api_key=openai_api_key)
 
     messages = [
@@ -177,6 +161,52 @@ class Interviewer:
                 missing.append(kw)
         return missing
 
+    def reviewer_node(self, question, answer, expected_points):
+        system_prompt = """
+        You are an expert answer reviewer.
+        Your job:
+        - Evaluate how well a candidate's answer responds to a given question.
+        - Compare the answer against a list of expected points or keywords.
+        - Be strict but fair, and explain your reasoning briefly.
+        - Never invent facts that are not in the answer.
+        
+        Evaluation criteria:
+        1. Relevance – Does the answer actually address the question?
+        2. Completeness – How many of the expected points are covered?
+        3. Depth – Does the answer show understanding, not just buzzwords?
+        4. Clarity – Is the answer clear and coherent?
+        
+        Return your evaluation **only** in this JSON format:
+        
+        {
+          "score": 0–100,
+          "verdict": "excellent" | "good" | "average" | "poor",
+          "covered_points": [ "point1", "point2", ... ],
+          "missing_points": [ "pointX", "pointY", ... ],
+          "strengths": "short paragraph",
+          "weaknesses": "short paragraph",
+          "follow_up_question": "one concise follow-up question focusing on gaps"
+        }
+        
+        If something is not applicable, use an empty list or an empty string.
+        Do not include any other text outside the JSON.
+        """
+
+        user_prompt = f"""
+        Question:
+        {question}
+        
+        Candidate answer:
+        {answer}
+        
+        Expected points to look for (can be keywords, concepts, or examples):
+        {expected_points}
+        
+        Please review the answer based on the system instructions and return the JSON evaluation.
+        """
+
+        llm_response = call_llm(system_prompt, user_prompt)
+        return llm_response
 
     def router(self, state: AgentState) -> str:
         """Decide the next node based on the current state."""
