@@ -17,7 +17,7 @@ class AgentState(TypedDict, total=False):
     latest_answer: Optional[str]
     pending_followups: List[str]
     last_prompt: Optional[str]
-    answers: List[Dict]  # {question_id, question, answer, missing, notes}
+    answers: List[Dict]
     done: bool
 
 # ---- Config loader -------------------------------------------------------
