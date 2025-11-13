@@ -4,6 +4,15 @@ import re
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from openai import OpenAI
+from dotenv import load_dotenv
+import os
+import sys
+
+parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
+sys.path.append(parent_dir)
+load_dotenv(os.path.join(parent_dir, ".env"))
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
 
 class AgentState(TypedDict, total=False):
@@ -13,7 +22,7 @@ class AgentState(TypedDict, total=False):
     latest_answer: Optional[str]
     pending_followups: List[str]
     last_prompt: Optional[str]
-    answers: List[Dict]  # {question_id, question, answer, missing, notes}
+    answers: List[Dict]
     done: bool
 
 
@@ -33,10 +42,25 @@ def find_missing_keywords(answer: str, required_keywords: List[str]) -> List[str
             missing.append(kw)
     return missing
 
-def llm_response():
-    return
 
-# ---- Node functions
+def call_llm(openai_api_key, system_prompt, user_prompt):
+    client = OpenAI(api_key=openai_api_key)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    completion = client.chat.completions.create(
+        messages=messages,
+        model="gpt-4o-mini",
+        max_tokens=512,
+        temperature=0.2,
+        n=1,
+        stop=None
+    )
+    return completion.choices[0].message.content.strip()
+
+
 class Interviewer:
     def __init__(self):
 
