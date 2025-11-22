@@ -4,26 +4,51 @@
     {
       "id": "q1",
       "text": "Can you describe your experience building agentic workflows? What tools and patterns did you use?",
-      "required_keywords": ["LangGraph", "tools", "planning", "reflection", "multi-agent"],
+      "required_keywords": [
+        "LangGraph",
+        "tools",
+        "planning",
+        "reflection",
+        "multi-agent"
+      ],
       "guidance": "Look for specific patterns (tool-use, planning, reflection) and concrete tools."
     },
     {
       "id": "q2",
       "text": "Tell me about your experience deploying on Azure for GenAI apps.",
-      "required_keywords": ["Azure", "Container Apps", "App Service", "Azure OpenAI", "networking"],
+      "required_keywords": [
+        "Azure",
+        "Container Apps",
+        "App Service",
+        "Azure OpenAI",
+        "networking"
+      ],
       "guidance": "Expect infra specifics: ACA/App Service, secrets, scaling, network/security."
     },
     {
       "id": "q3",
       "text": "How have you implemented RAG in production?",
-      "required_keywords": ["RAG", "Qdrant", "Azure AI Search", "chunking", "evaluation"],
+      "required_keywords": [
+        "RAG",
+        "Qdrant",
+        "Azure AI Search",
+        "chunking",
+        "evaluation"
+      ],
       "guidance": "Signal for vector DB, chunking strategy, retrieval, and eval/feedback loops."
     },
     {
       "id": "q4",
       "text": "What’s your approach to building simple UIs for demos or POCs?",
-      "required_keywords": ["Streamlit", "state management", "callbacks", "session_state", "deploy"],
+      "required_keywords": [
+        "Streamlit",
+        "state management",
+        "callbacks",
+        "session_state",
+        "deploy"
+      ],
       "guidance": "Expect Streamlit details and how they manage state + deploy."
     }
-  ]
+  ],
+  "number_of_followup_chances": 1
 }
