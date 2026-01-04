@@ -2,3 +2,4 @@ __pycache__
 .env
 report.md
 .ipynb_checkpoints
+Dockerfile

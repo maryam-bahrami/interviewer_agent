@@ -32,6 +32,25 @@ class JobConfig:
     no_followup_chances: int
     done: bool
 
+# Path to the job configuration JSON file (relative to this script)
+cfg_path = os.getenv("JOB_DESCRIPTION_PATH")
+
+# Load job description and interview questions
+config = load_job_config(cfg_path)
+
+config = JobConfig(
+    jd=config["job_description"],
+    questions=config["questions"],
+    q_idx=0,  # Start state
+    latest_answer=None,
+    pending_followups=[],
+    last_prompt=None,
+    answers=[],
+    no_followup_chances=int(config["number_of_followup_chances"]),
+    done=False
+)
+
+
 class AgentState(TypedDict, total=False):
     jd: str
     questions: List[Dict]
@@ -85,31 +104,33 @@ class Interviewer:
                                         api_key=os.getenv("API_KEY", "not-needed"),
                                            )
 
-    async def node_ask_question(self, state: AgentState) -> AgentState:
-        """Async ask node that prompts the user and waits for their answer."""
-        import asyncio
-
+    async def node_ask_question(self, state: AgentState, get_user_input=None) -> AgentState:
         if state.get("done"):
             return state
 
-        # Prioritize follow‑ups
-        if state.get("pending_followups"):
+        # --- PRIORITIZE FOLLOW-UPS (unchanged) ---
+        if state["pending_followups"]:
             prompt = state["pending_followups"].pop(0)
         else:
-            q_idx = state.get("q_idx", 0)
-            questions = state["questions"]
-            if q_idx >= len(questions):
+            q_idx = state["q_idx"]
+            if q_idx >= len(state["questions"]):
                 state["done"] = True
-                state["last_prompt"] = None
                 return state
-            prompt = questions[q_idx]["text"]
+            prompt = state["questions"][q_idx]["text"]
 
-        # Show the prompt and wait for user input asynchronously
-        print(prompt)
-        answer = await asyncio.to_thread(lambda: input("> "))
-        # Store the answer so the evaluation node can process it
+        # ---- FRONTEND INPUT INSTEAD OF CONSOLE INPUT ----
+        if get_user_input is None:
+            # fallback: console-based
+            import asyncio
+            answer = await asyncio.to_thread(lambda: input("> "))
+        else:
+            # frontend-based
+            answer = await get_user_input(prompt)
+
         state["latest_answer"] = answer
         state["last_prompt"] = prompt
+        return state
+
 
         return state
 
