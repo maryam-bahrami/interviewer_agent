@@ -3,3 +3,7 @@ openai>=1.40.0
 tiktoken>=0.7.0
 streamlit>=1.37.0
 pydantic>=2.8.2
+langchain
+gradio
+uvicorn
+dotenv
