@@ -1,219 +1,401 @@
 from __future__ import annotations
-from typing import List, Dict, Optional, TypedDict
-import re
 
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
-from openai import OpenAI
-from dotenv import load_dotenv
+import json
 import os
 import sys
+from dataclasses import dataclass
+from pathlib import Path
+from pprint import pprint
+from typing import Dict, List, Optional, TypedDict, Any
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.chat_models import init_chat_model
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+
+from openai import OpenAI
 
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 sys.path.append(parent_dir)
 load_dotenv(os.path.join(parent_dir, ".env"))
 
+def load_job_config(cfg_path: str) -> Dict[str, Any]:
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@dataclass
+class JobConfig:
+    jd: str
+    questions: list
+    q_idx: int
+    latest_answer: Optional[str]
+    pending_followups: list
+    last_prompt: Optional[str]
+    answers: list
+    no_followup_chances: int
+    done: bool
+
+
+cfg_path = os.path.join(parent_dir, "interviewer_agent/data/job_config.json")
+
+# Load job description and interview questions
+config = load_job_config(cfg_path)
+
+config = JobConfig(
+    jd=config["job_description"],
+    questions=config["questions"],
+    q_idx=0,  # Start state
+    latest_answer=None,
+    pending_followups=[],
+    last_prompt=None,
+    answers=[],
+    no_followup_chances=int(config["number_of_followup_chances"]),
+    done=False
+)
 
 
 class AgentState(TypedDict, total=False):
-    job_description: str
+    jd: str
     questions: List[Dict]
-    question_idx: int
+    q_idx: int
     latest_answer: Optional[str]
     pending_followups: List[str]
     last_prompt: Optional[str]
     answers: List[Dict]
+    llm_responses: List[Dict]
     done: bool
+    report: str
+    review: str
 
 
-def call_llm(system_prompt, user_prompt):
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    client = OpenAI(api_key=openai_api_key)
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-    completion = client.chat.completions.create(
-        messages=messages,
-        model="gpt-4o-mini",
-        max_tokens=512,
-        temperature=0.2,
-        n=1,
-        stop=None
+def initial_state_from_config(cfg: JobConfig) -> AgentState:
+    """Create the initial LangGraph state from the loaded job configuration."""
+    return AgentState(
+        jd=cfg.jd,
+        questions=cfg.questions,
+        q_idx=0,
+        latest_answer=None,
+        pending_followups=[],
+        last_prompt=None,
+        answers=[],
+        llm_responses=[],
+        review="",
+        done=False,
     )
-    return completion.choices[0].message.content.strip()
-
 
 class Interviewer:
+    """Encapsulates the ask/evaluate logic as class methods."""
+
     def __init__(self):
-
-        builder = StateGraph(AgentState)
-        builder.add_node("ask", self.node_ask_question)
-        builder.add_node("evaluate", self.node_evaluate_answer)
-
-        # Entry point is the evaluation node – it will immediately route to “ask”
-        builder.set_entry_point("evaluate")
-
-        # After evaluation decide where to go next
-        builder.add_conditional_edges(
-            "evaluate",
-            self.router,
-            {
-                "ask": "ask",
-                "end": END,
-            })
-
-        # After asking a question we always go back to evaluation (once the UI supplies an answer)
-        builder.add_edge("ask", "evaluate")
-
-        memory = MemorySaver()
-        self.graph = builder.compile(checkpointer=memory)
-
-    async def run(self, config) -> AgentState:
-        start: AgentState = {"job_description": config.job_description, "questions": config.questions,}
-        return await self.graph.ainvoke(start, {"configurable": {"thread_id": "ui", "recursion_limit": 100}})
-
-    # Nodes
-    async def node_ask_question(self, state: AgentState) -> AgentState:
-        """Async ask node that prompts the user and waits for their answer."""
-        import asyncio
-
-        if state.get("done"):
-            return state
-
-        # Prioritize follow‑ups
-        if state.get("pending_followups"):
-            prompt = state["pending_followups"].pop(0)
-        else:
-            question_idx = state.get("question_idx", 0)
-            questions = state["questions"]
-            if question_idx >= len(questions):
-                state["done"] = True
-                state["last_prompt"] = None
-                return state
-            prompt = questions[question_idx]["text"]
-
-        # Show the prompt and wait for user input asynchronously
-        print(prompt)
-        answer = await asyncio.to_thread(lambda: input("> "))
-        # Store the answer so the evaluation node can process it
-        state["latest_answer"] = answer
-        state["last_prompt"] = prompt
-        print("*****")
-        print(state)
-        print("*****")
-        return state
+        self.chat_model = init_chat_model(
+            os.getenv("MODEL_NAME", "gpt-4o-mini"),
+            base_url=os.getenv("BASE_URL", ""),
+            api_key=os.getenv("API_KEY", "not-needed"),
+        )
 
     def node_evaluate_answer(self, state: AgentState) -> AgentState:
-        """Evaluate the latest answer, generate follow‑ups, and advance the state."""
+        """Evaluate the latest answer, generate follow-ups, and advance the state."""
         if state.get("done"):
             return state
-
-        # If no answer has been provided yet (initial entry), just skip processing.
+    
         if state.get("latest_answer") is None:
             return state
-
-        question_idx = state.get("question_idx", 0)
+    
+        q_idx = state.get("q_idx", 0)
         questions = state["questions"]
-        if question_idx >= len(questions):
+        if q_idx >= len(questions):
             state["done"] = True
             return state
-
+    
         latest = (state.get("latest_answer") or "").strip()
-        q = questions[question_idx]
-        required = q.get("required_keywords", [])
-        missing = self.find_missing_keywords(latest, required)
+        q = questions[q_idx]
+        question = q["text"]
+        required_keywords = q.get("required_keywords", [])
+    
+        # ----- LLM CALL -----------------------------------------------------------
+        system_prompt = """
+        You are an expert hiring assistant evaluating candidate answers during an interview. Your task is to check whether the candidate’s answer demonstrates understanding of the topic. Understanding may be shown in two ways: 1. The answer explicitly contains the expected keywords. 2. The answer does not use the exact keywords but explains the concepts correctly and completely. Always evaluate based on meaning, not just exact wording. Return your result in the specified JSON structure and be kind with the user.
+        Return ONLY valid JSON.
+        """
+    
+        user_prompt = """
+        [Interview Question]
+        {question}
+    
+        [Expected Keywords or Concepts]
+        {required_keywords}
+    
+        [Candidate Answer]
+        {latest}
+    
+        Your task: 
+        1. Identify whether the candidate’s answer contains each expected keyword. 
+        2. If a keyword is missing but the candidate clearly explains the idea, mark it as "explained". 
+        3. If neither the keyword nor the concept is present, mark it as "missing". 
+        4. Give a short explanation for each classification. 
+        5. If a keyword is missing make one follow-up question to clarify the missing keywords in "follow_up" 
+        6. If the user does not understand the question, try to clarify and reformulate the question.
+        7. If the user asks question about company data, do not provide the the data and reject the user's request respectfully.
+        8. If the user provides any personal data (e.g age, gender, marital status, address etc.), do not store this data in the memory.
+        9. Do not ask user any discriminative questions (e.g gender, nationality, color of skin etc.)
+        10. If a question was answered previously, do not ask it again. 
+        
+        JSON format:
+        {{
+          "keywords": [
+            {{
+              "keyword": "",
+              "status": "present | explained | missing",
+              "explanation": ""
+            }}
+          ],
+          "overall_assessment": "",
+          "score": "",
+          "follow_up": ""
+        }}
+        """
 
-        # Record the answer
+        user_prompt = user_prompt.format(question = q["text"],
+                                           required_keywords=required_keywords,
+                                           latest=latest)
+        
+        llm_response = self.chat_model.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ])
+        parsed = json.loads(llm_response.content)
+    
+        # ---- TRACK LLM RESPONSES -------------------------------------------------
+        if "llm_responses" not in state:
+            state["llm_responses"] = []
+    
+        # initialize response tracker for this question if needed
+        if len(state["llm_responses"]) <= q_idx:
+            state["llm_responses"].append({
+                "q_idx": q_idx,
+                "follow_up_count": 0,
+                "history": []
+            })
+    
+        q_track = state["llm_responses"][q_idx]
+        q_track["history"].append(parsed)
+    
+        follow_up = parsed.get("follow_up", "").strip()
+    
+        # ---- FOLLOW-UP LOGIC WITH LIMIT -------------------------------------
+        if follow_up:  
+            if q_track["follow_up_count"] < config.no_followup_chances :
+                q_track["follow_up_count"] += 1
+                state["pending_followups"].append(follow_up)
+            else:
+                # exceeded 3 follow-ups → move to next question
+                #print("⚠️ Maximum follow-ups reached. Moving to next question.")
+                state["pending_followups"] = []
+                state["q_idx"] = q_idx + 1
+        else:
+            # answer was complete → move to next question
+            state["q_idx"] = q_idx + 1
+    
+        # ---- SAVE USER ANSWER ----------------------------------------------------
         answers = state.get("answers", [])
         answers.append({
             "question_id": q["id"],
             "question": q["text"],
             "answer": latest,
-            "missing": missing,
             "notes": q.get("guidance", "")
         })
         state["answers"] = answers
+    
+        #state["latest_answer"] = None
 
-        # Generate follow‑ups for missing keywords
-        if missing:
-            for m in missing:
-                fu = f"You didn’t mention “{m}”. Could you add details regarding {m}?"
-                state.setdefault("pending_followups", []).append(fu)
-        else:
-            # Advance to the next main question
-            state["question_idx"] = question_idx + 1
+        return state
+            
+    def node_reviewer(self, state: AgentState) -> AgentState:
+        reviewer_prompt = """
+                You are an expert AI-engineering interviewer reviewing candidate answers.
+                Evaluate all answers based on:
+                
+                **1. Relevance to the question**
+                **2. Technical correctness**
+                **3. Alignment with the job description (JD)**
+                **4. Presence of required keywords (from question metadata)**
+                **5. Professionalism and clarity**
+                **6. Depth of experience**
+                **7. Signal vs noise (usefulness)**
+                
+                ---------------------------
+                ### JOB DESCRIPTION:
+                {jd}
+                
+                ---------------------------
+                ### CANDIDATE ANSWERS:
+                Provide a structured review for **each answer** below.
+                
+                Format per answer:
+                - **Question ID**
+                - **Question Text**
+                - **Candidate Answer**
+                - **Evaluation** (2–5 sentences)
+                - **Score (0–10)** based on relevance + technical depth + JD alignment
+                - **Keyword Coverage**: list which required keywords (from question.required_keywords) are present or missing
+                
+                Finally produce:
+                
+                ### OVERALL SUMMARY
+                - Strengths
+                - Weaknesses
+                - Hiring Risk Level (Low/Medium/High)
+                - Final Overall Score (0–10)
+                
+                ---------------------------
+                ### DATA:
+                {answers}
+                ---------------------------
+                
+                Return JSON with this structure:
+                
+                {{
+                  "per_question_reviews": [...],
+                  "overall_summary": "...",
+                  "final_score": <number 0–10>
+                }}
+                """
+        reviewer_prompt = reviewer_prompt.format(jd=state["jd"], answers=state["answers"])
+        response = self.chat_model.invoke([HumanMessage(content=reviewer_prompt)])
+        state["review"] = response.content  # attach review to state
 
-        # Reset the latest answer for the next round
-        state["latest_answer"] = None
         return state
 
-    def find_missing_keywords(self, answer: str, required_keywords: List[str]) -> List[str]:
-        """Return a list of required keywords that are not present in *answer*."""
-        if not required_keywords:
-            return []
-        a = answer.lower()
-        missing = []
-        for kw in required_keywords:
-            pattern = r"\b" + re.escape(kw.lower()).replace(r"\ ", r"[\s\-/\\_]+") + r"\b"
-            if not re.search(pattern, a):
-                missing.append(kw)
-        return missing
-
-    def reviewer_node(self, question, answer, expected_points):
-        system_prompt = """
-        You are an expert answer reviewer.
-        Your job:
-        - Evaluate how well a candidate's answer responds to a given question.
-        - Compare the answer against a list of expected points or keywords.
-        - Be strict but fair, and explain your reasoning briefly.
-        - Never invent facts that are not in the answer.
+    def node_reporter(self, state: AgentState) -> AgentState:
+        reporter_prompt = """
+                    You are an expert technical writer.  
+                    Your task is to convert the review data into a **clean, polished, executive-quality Markdown report**.
+                    
+                    The audience is:
+                    - Hiring managers
+                    - Senior AI/ML engineers
+                    - Talent acquisition specialists
+                    
+                    The tone should be:
+                    - Professional
+                    - Clear
+                    - Concise
+                    - Evidence-based
+                    
+                    ---------------------------
+                    ### REVIEW DATA TO SUMMARIZE:
+                    
+                    {review}
+                    
+                    ---------------------------
+                    
+                    ### MARKDOWN REPORT REQUIREMENTS
+                    
+                    Produce a Markdown document with the following structure:
+                    
+                    # Candidate Evaluation Report
+                    
+                    ## 1. Executive Summary
+                    - One concise paragraph summarizing overall performance, strengths, and concerns.
+                    
+                    ## 2. Job Description Alignment
+                    Summarize how well the candidate matches the JD requirements.
+                    
+                    ## 3. Detailed Review by Question
+                    For each question:
+                    - **Question ID**
+                    - **Question Text**
+                    - **Score**
+                    - **Summary of evaluation**
+                    - **Keyword Coverage**
+                    - Bullet points highlighting strengths and weaknesses.
+                    
+                    ## 4. Overall Assessment
+                    - Final score (0–10)
+                    - Hiring recommendation: **Strong Hire / Hire / Weak Hire / No Hire**
+                    
+                    ## 5. Risks & Flags
+                    Bullet list of any major issues or concerns.
+                    
+                    Ensure the Markdown is clean and does not include unnecessary JSON dumps.
+                    """
+                            
+        reporter_prompt = reporter_prompt.format(review=state["review"])
+        response = self.chat_model.invoke([HumanMessage(content=reporter_prompt)])
+        state["report"] = response.content  # attach report to state
+        output_path = pathlib.Path("report.md")
+        output_path.write_text(state["report"], encoding="utf-8")
         
-        Evaluation criteria:
-        1. Relevance – Does the answer actually address the question?
-        2. Completeness – How many of the expected points are covered?
-        3. Depth – Does the answer show understanding, not just buzzwords?
-        4. Clarity – Is the answer clear and coherent?
+        print("******")
+        pprint(state["report"])
+        print("******")
+        return state
         
-        Return your evaluation **only** in this JSON format:
-        
-        {
-          "score": 0–100,
-          "verdict": "excellent" | "good" | "average" | "poor",
-          "covered_points": [ "point1", "point2", ... ],
-          "missing_points": [ "pointX", "pointY", ... ],
-          "strengths": "short paragraph",
-          "weaknesses": "short paragraph",
-          "follow_up_question": "one concise follow-up question focusing on gaps"
-        }
-        
-        If something is not applicable, use an empty list or an empty string.
-        Do not include any other text outside the JSON.
-        """
-
-        user_prompt = f"""
-        Question:
-        {question}
-        
-        Candidate answer:
-        {answer}
-        
-        Expected points to look for (can be keywords, concepts, or examples):
-        {expected_points}
-        
-        Please review the answer based on the system instructions and return the JSON evaluation.
-        """
-
-        llm_response = call_llm(system_prompt, user_prompt)
-        return llm_response
-
     def router(self, state: AgentState) -> str:
         """Decide the next node based on the current state."""
         if state.get("done"):
-            return "end"
+            #return "end"
+            return "review"
         if state.get("pending_followups"):
             return "ask"
         # If we have just recorded an answer (latest_answer cleared) we need to ask next
         return "ask"
+
+# ---- Graph builder -------------------------------------------------------
+
+def build_graph(config: JobConfig) -> StateGraph:
+    """Create a LangGraph where the interview flow is driven entirely by the graph."""
+    interviewer = Interviewer()
+
+    builder = StateGraph(AgentState)
+
+    # Register the class methods as graph nodes
+    builder.add_node("ask", interviewer.node_ask_question)
+    builder.add_node("evaluate", interviewer.node_evaluate_answer)
+    builder.add_node("review", interviewer.node_reviewer)
+    builder.add_node("report", interviewer.node_reporter)
+
+    # Entry point is the evaluation node – it will immediately route to “ask”
+    builder.set_entry_point("evaluate")
+
+    # After evaluation decide where to go next
+    builder.add_conditional_edges(
+        "evaluate",
+        interviewer.router,
+        {
+            "ask": "ask",
+            #"end": END
+            "review": "review"
+        },
+    )
+
+    # After asking a question we always go back to evaluation (once the UI supplies an answer)
+    builder.add_edge("ask", "evaluate")
+    builder.add_edge("review", "report")
+    builder.add_edge("report", END)
+    
+    memory = MemorySaver()
+    graph = builder.compile(checkpointer=memory)
+    return graph
+
+def get_next_prompt(state: AgentState) -> Optional[str]:
+    """
+    Decide what to show next in the UI:
+    - follow-ups first
+    - else next main question
+    - else None if done
+    """
+    if state.get("done"):
+        return None
+
+    pending = state.get("pending_followups") or []
+    if pending:
+        return pending[0]
+
+    q_idx = state.get("q_idx", 0)
+    questions = state.get("questions", [])
+    if q_idx >= len(questions):
+        return None
+
+    return questions[q_idx]["text"]
 
