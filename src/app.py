@@ -1,9 +1,13 @@
 import streamlit as st
-import os
-import json
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+from agents import (
+    config,
+    initial_state_from_config,
+    Interviewer,
+    get_next_prompt,
+)
 
 parent_dir = Path(__file__).resolve().parent.parent
 load_dotenv(parent_dir / ".env")
@@ -12,14 +16,6 @@ st.set_page_config(page_title="Interview Agent", page_icon="🎤")
 st.title("🎤 Interviewer Assistant")
 st.markdown("Bot asks questions → you answer → it evaluates → follow-ups if needed → final report. 🚀")
 
-
-
-from agents import (
-    config,
-    initial_state_from_config,
-    Interviewer,
-    get_next_prompt,
-)
 
 def push(role: str, content: str):
     st.session_state.chat.append({"role": role, "content": content})
@@ -59,34 +55,28 @@ if "last_shown_prompt" not in st.session_state:
 
 
 with st.sidebar:
-    st.header("Controls")
-
-    if st.button("🔄 Reset interview", use_container_width=True):
-        reset()
-        st.rerun()
-
-    st.divider()
-    st.subheader("Progress")
-    q_idx = st.session_state.state.get("q_idx", 0)
-    total = len(st.session_state.state.get("questions", []))
-    pending = len(st.session_state.state.get("pending_followups", []))
-    done = st.session_state.state.get("done", False)
-
-    st.write(f"Question: {min(q_idx + 1, total)} / {total}")
-    st.write(f"Follow-ups queued: {pending}")
-    st.write(f"Done: {done}")
-
-    st.divider()
-    show_debug = st.toggle("Show debug feedback (LLM JSON)", value=False)
-
     now = datetime.now()
 
     st.header("🗓️ Today")
     st.write(f"**Date:** {now:%A, %d %B %Y}")
     st.write(f"**Time:** {now:%H:%M:%S}")
 
+    st.divider()
+    if st.button("🔄 Reset interview", use_container_width=True):
+        reset()
+        st.rerun()
+
+    st.subheader("Progress")
+    q_idx = st.session_state.state.get("q_idx", 0)
+    total = len(st.session_state.state.get("questions", []))
+    pending = len(st.session_state.state.get("pending_followups", []))
+    done = st.session_state.state.get("done", False)
+    st.write(f"Question: {min(q_idx + 1, total)} / {total}")
+    st.write(f"Follow-ups queued: {pending}")
+    st.write(f"Done: {done}")
+
     # support button
-    st.markdown("<hr>", unsafe_allow_html=True)
+    st.divider()
     st.markdown("If you encounter any issue during interview, Please **contact us**:", unsafe_allow_html=True)
 
     recipient_email = "support@example.com"
@@ -152,18 +142,6 @@ if st.session_state.report_ready and st.session_state.state.get("report"):
     st.stop()
 
 
-# ------------------------
-# Optional debug feedback (per question evaluation JSON history)
-# ------------------------
-if show_debug:
-    with st.expander("Debug: LLM evaluation history (per question)", expanded=False):
-        llm_responses = st.session_state.state.get("llm_responses", []) or []
-        st.write(llm_responses)
-
-
-# ------------------------
-# Normal turn: user answers
-# ------------------------
 user_text = st.chat_input("Type your answer and press Enter...")
 
 if user_text:

@@ -13,15 +13,15 @@ from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from openai import OpenAI
-
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 sys.path.append(parent_dir)
 load_dotenv(os.path.join(parent_dir, ".env"))
 
+
 def load_job_config(cfg_path: str) -> Dict[str, Any]:
     with open(cfg_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
 
 @dataclass
 class JobConfig:
@@ -93,6 +93,33 @@ class Interviewer:
             api_key=os.getenv("API_KEY", "not-needed"),
         )
 
+    async def node_ask_question(self, state: AgentState, get_user_input=None) -> AgentState:
+        if state.get("done"):
+            return state
+
+        # --- PRIORITIZE FOLLOW-UPS (unchanged) ---
+        if state["pending_followups"]:
+            prompt = state["pending_followups"].pop(0)
+        else:
+            q_idx = state["q_idx"]
+            if q_idx >= len(state["questions"]):
+                state["done"] = True
+                return state
+            prompt = state["questions"][q_idx]["text"]
+
+        # ---- FRONTEND INPUT INSTEAD OF CONSOLE INPUT ----
+        if get_user_input is None:
+            # fallback: console-based
+            import asyncio
+            answer = await asyncio.to_thread(lambda: input("> "))
+        else:
+            # frontend-based
+            answer = await get_user_input(prompt)
+
+        state["latest_answer"] = answer
+        state["last_prompt"] = prompt
+        return state
+
     def node_evaluate_answer(self, state: AgentState) -> AgentState:
         """Evaluate the latest answer, generate follow-ups, and advance the state."""
         if state.get("done"):
@@ -156,8 +183,8 @@ class Interviewer:
         """
 
         user_prompt = user_prompt.format(question = q["text"],
-                                           required_keywords=required_keywords,
-                                           latest=latest)
+                                         required_keywords=required_keywords,
+                                         latest=latest)
         
         llm_response = self.chat_model.invoke([
             SystemMessage(content=system_prompt),
@@ -189,7 +216,7 @@ class Interviewer:
                 state["pending_followups"].append(follow_up)
             else:
                 # exceeded 3 follow-ups → move to next question
-                #print("⚠️ Maximum follow-ups reached. Moving to next question.")
+                # print("⚠️ Maximum follow-ups reached. Moving to next question.")
                 state["pending_followups"] = []
                 state["q_idx"] = q_idx + 1
         else:
@@ -206,7 +233,7 @@ class Interviewer:
         })
         state["answers"] = answers
     
-        #state["latest_answer"] = None
+        # state["latest_answer"] = None
 
         return state
             
@@ -323,7 +350,7 @@ class Interviewer:
         reporter_prompt = reporter_prompt.format(review=state["review"])
         response = self.chat_model.invoke([HumanMessage(content=reporter_prompt)])
         state["report"] = response.content  # attach report to state
-        output_path = pathlib.Path("report.md")
+        output_path = Path("report.md")
         output_path.write_text(state["report"], encoding="utf-8")
         
         print("******")
@@ -341,9 +368,9 @@ class Interviewer:
         # If we have just recorded an answer (latest_answer cleared) we need to ask next
         return "ask"
 
-# ---- Graph builder -------------------------------------------------------
 
-def build_graph(config: JobConfig) -> StateGraph:
+# ---- Graph builder -------------------------------------------------------
+def build_graph() -> StateGraph:
     """Create a LangGraph where the interview flow is driven entirely by the graph."""
     interviewer = Interviewer()
 
@@ -364,7 +391,7 @@ def build_graph(config: JobConfig) -> StateGraph:
         interviewer.router,
         {
             "ask": "ask",
-            #"end": END
+            # "end": END
             "review": "review"
         },
     )
@@ -377,6 +404,7 @@ def build_graph(config: JobConfig) -> StateGraph:
     memory = MemorySaver()
     graph = builder.compile(checkpointer=memory)
     return graph
+
 
 def get_next_prompt(state: AgentState) -> Optional[str]:
     """
@@ -398,4 +426,3 @@ def get_next_prompt(state: AgentState) -> Optional[str]:
         return None
 
     return questions[q_idx]["text"]
-
